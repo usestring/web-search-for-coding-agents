@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import nimble
 import re
 import time
 from typing import Any, Callable, Protocol
@@ -424,6 +425,42 @@ class TavilyAdvanced(TavilySearch):
     extract_depth = "advanced"
 
 
+class NimbleLite:
+    name = "nimble_lite"
+    depth = "lite"
+    last_meta: dict[str, Any] | None = None
+
+    def search(self, query: str, *, max_results: int = DEFAULT_MAX_RESULTS) -> list[dict[str, str]]:
+        key = os.environ.get("NIMBLE_API_KEY")
+        if not key:
+            raise RuntimeError(f"NIMBLE_API_KEY is required for {self.name}")
+        payload, meta = vendor_call(self, "POST", nimble.SEARCH_URL,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json_body=nimble.search_body(query, self.depth, max_results), timeout=60)
+        hits = nimble.search_hits(payload, max_results)
+        for hit in hits:
+            hit["snippet"] = hit["snippet"][:1200]
+        self.last_meta = _search_meta(meta, hits)
+        return hits
+
+    def fetch(self, url: str, *, objective: str = "") -> dict[str, str]:
+        key = os.environ.get("NIMBLE_API_KEY")
+        if not key:
+            raise RuntimeError(f"NIMBLE_API_KEY is required for {self.name}")
+        payload, meta = vendor_call(self, "POST", nimble.EXTRACT_URL,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json_body={"url": url, "formats": ["markdown"]}, timeout=FETCH_TIMEOUT_S)
+        extracted = nimble.extract_page(payload, url, DEFAULT_MAX_FETCH_CHARS)
+        self.last_meta = {**meta, "truncated": extracted["truncated"]}
+        return {"url": extracted["final_url"], "title": extracted["title"],
+                "content": extracted["text"], "_meta": self.last_meta}
+
+
+class NimbleStandard(NimbleLite):
+    name = "nimble_standard"
+    depth = "standard"
+
+
 class BraveSearch:
     """Brave LLM Context search-only.
 
@@ -526,6 +563,41 @@ class YouSearch:
         self.last_meta = {**meta, **flags}
         page["_meta"] = self.last_meta
         return page
+
+
+class YouHighlights(YouSearch):
+    """You.com Highlights with separate Contents API fetch.
+
+    POST /v1/search with extraction.extraction_mode=highlights. Query-aware
+    passages land in contents.highlights; default snippets are omitted. Fetch
+    uses the separate Contents API on search + fetch boards.
+    """
+
+    name = "you_highlights"
+    knowledge: str | None = None
+
+    def search(self, query: str, *, max_results: int = DEFAULT_MAX_RESULTS) -> list[dict[str, str]]:
+        n = max(1, min(int(max_results), 100))
+        payload, meta = vendor_call(
+            self,
+            "POST",
+            YOU_SEARCH_URL,
+            headers=self._headers(),
+            json_body={
+                "query": query,
+                "count": n,
+                "extraction": {"extraction_mode": "highlights"},
+                **({"knowledge": self.knowledge} if self.knowledge else {}),
+            },
+            timeout=45,
+        )
+        hits = parse_you_hits(payload, max_results=n)
+        self.last_meta = _search_meta(meta, hits)
+        return hits
+
+class YouHighlightsCore(YouHighlights):
+    name = "you_highlights_core"
+    knowledge = "core"
 
 
 class TinyfishSearch:
@@ -1378,6 +1450,8 @@ def _pop_flags(page: dict[str, Any]) -> dict[str, Any]:
 
 # Canonical ids. Aliases below keep old CLI names working.
 SEARCH_ONLY_BACKENDS: tuple[str, ...] = (
+    "nimble_lite",
+    "nimble_standard",
     "parallel_turbo",
     "parallel_fast",
     "exa_fast",
@@ -1386,12 +1460,15 @@ SEARCH_ONLY_BACKENDS: tuple[str, ...] = (
     "brave",
     "linkup_fast",
     "firecrawl",
-    "you",
+    "you_highlights",
+    "you_highlights_core",
     "tinyfish",
     "perplexity_low",
     "string",
 )
 SEARCH_FETCH_BACKENDS: tuple[str, ...] = (
+    "nimble_lite",
+    "nimble_standard",
     "parallel_basic",
     "parallel_advanced",
     "exa_auto",
@@ -1400,7 +1477,8 @@ SEARCH_FETCH_BACKENDS: tuple[str, ...] = (
     "tavily_advanced",
     "linkup_standard",
     "firecrawl",
-    "you",
+    "you_highlights",
+    "you_highlights_core",
     "tinyfish",
     "perplexity_high",
     "string",
@@ -1412,7 +1490,7 @@ BACKEND_ALIASES = {
 }
 # Search-only exclusive rows cannot turn fetch on. Search+fetch exclusive rows
 # cannot turn fetch off. Dual-split vendors sit on both boards.
-DUAL_SPLIT_BACKENDS = frozenset({"firecrawl", "you", "tinyfish", "string"})
+DUAL_SPLIT_BACKENDS = frozenset({"nimble_lite", "nimble_standard", "firecrawl", "you_highlights", "you_highlights_core", "tinyfish", "string"})
 FETCH_FORBIDDEN = frozenset(SEARCH_ONLY_BACKENDS) - DUAL_SPLIT_BACKENDS
 FETCH_REQUIRED = frozenset(SEARCH_FETCH_BACKENDS) - DUAL_SPLIT_BACKENDS
 
@@ -1435,7 +1513,10 @@ BACKENDS: dict[str, Callable[[], SearchBackend]] = {
     "tavily_basic": TavilyBasic,
     "tavily_advanced": TavilyAdvanced,
     "brave": BraveSearch,
-    "you": YouSearch,
+    "nimble_lite": NimbleLite,
+    "nimble_standard": NimbleStandard,
+    "you_highlights": YouHighlights,
+    "you_highlights_core": YouHighlightsCore,
     "tinyfish": TinyfishSearch,
     "perplexity_low": PerplexitySearch,
     "perplexity_high": PerplexityHigh,
