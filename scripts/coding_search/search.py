@@ -733,8 +733,8 @@ class PerplexityHigh(PerplexitySearch):
 class StringSearch:
     """String Web Access search + fetch.
 
-    Search: POST /v1/search with engine=google. Organic results with their
-    result-page snippets; no count param, so slice to max_results.
+    Search: POST /v1/search with engine=google and searchCount=max_results,
+    which pages Google until it has that many organic results.
 
     Fetch: POST /v1/fetch format=markdown, markdownMode=readable. Readable
     drops forum and docs-site navigation that otherwise fills the fetch budget
@@ -761,7 +761,7 @@ class StringSearch:
             "POST",
             STRING_SEARCH_URL,
             headers=self._headers(),
-            json_body={"query": query, "engine": self.engine},
+            json_body={"query": query, "engine": self.engine, "searchCount": min(max_results, 300)},
             timeout=60,
         )
         hits = parse_string_hits(payload, max_results=max_results)
